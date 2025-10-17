@@ -1,0 +1,112 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from statsmodels.tsa.api import SimpleExpSmoothing, Holt, ExponentialSmoothing
+
+# Copy dataset from Power BI
+df = dataset.copy()
+
+# Ensure numeric types
+df['Week'] = pd.to_numeric(df['Week'], errors='coerce')
+df['Total Material Need'] = pd.to_numeric(df['Total Material Need'], errors='coerce')
+df = df.dropna(subset=['Week', 'Total Material Need'])
+
+results = []
+forecast_horizon = 6
+
+# --- Forecast for each Material ---
+for mat, grp in df.groupby('Material'):
+    grp = grp.sort_values('Week')
+    y = grp['Total Material Need'].values
+    weeks = grp['Week'].values
+
+    # If not enough data, use last known value
+    if len(y) < 2:
+        last_val = y[-1] if len(y) > 0 else 0
+        best_forecast = [last_val]*forecast_horizon
+        best_model = 'Last Value'
+    else:
+        # Define models
+        models = {}
+        window = min(3, len(y))
+        models['Moving Average'] = pd.Series(y).rolling(window=window).mean().iloc[-1]
+
+        try:
+            models['SES'] = SimpleExpSmoothing(y).fit().forecast(forecast_horizon)
+        except Exception:
+            models['SES'] = [np.nan]*forecast_horizon
+
+        try:
+            models['Holt'] = Holt(y).fit().forecast(forecast_horizon)
+        except Exception:
+            models['Holt'] = [np.nan]*forecast_horizon
+
+        try:
+            models['Holt-Winters Add'] = ExponentialSmoothing(
+                y, trend='add', seasonal=None
+            ).fit().forecast(forecast_horizon)
+        except Exception:
+            models['Holt-Winters Add'] = [np.nan]*forecast_horizon
+
+        try:
+            seasonal_periods = min(4, max(1, len(y)//2))
+            models['Holt-Winters Mul'] = ExponentialSmoothing(
+                y, trend='add', seasonal='mul', seasonal_periods=seasonal_periods
+            ).fit().forecast(forecast_horizon)
+        except Exception:
+            models['Holt-Winters Mul'] = [np.nan]*forecast_horizon
+
+        # Evaluate models
+        test_len = min(forecast_horizon, len(y))
+        test = y[-test_len:]
+
+        def mae(y_true, y_pred):
+            return np.mean(np.abs(np.array(y_true) - np.array(y_pred)))
+
+        metrics = {}
+        for name, model_forecast in models.items():
+            if np.isscalar(model_forecast):
+                model_forecast = [model_forecast]*forecast_horizon
+            metrics[name] = mae(test, model_forecast[:test_len])
+
+        best_model = min(metrics, key=metrics.get)
+        best_forecast = models[best_model]
+        if np.isscalar(best_forecast):
+            best_forecast = [best_forecast]*forecast_horizon
+
+    # Append predictions
+    last_week = weeks[-1] if len(weeks) > 0 else 0
+    for i in range(forecast_horizon):
+        results.append({
+            'Material': mat,
+            'Week': last_week + i + 1,
+            'Forecasted Material Need': float(best_forecast[i]) if not np.isnan(best_forecast[i]) else 0,
+            'Model Used': best_model
+        })
+
+# --- Final Dataset ---
+dataset = pd.DataFrame(results)
+if dataset.empty:
+    dataset = pd.DataFrame({
+        'Material': ['No Data'],
+        'Week': [0],
+        'Forecasted Material Need': [0.0],
+        'Model Used': ['None']
+    })
+
+dataset['Material'] = dataset['Material'].astype(str)
+dataset['Week'] = pd.to_numeric(dataset['Week'], errors='coerce')
+dataset['Forecasted Material Need'] = pd.to_numeric(dataset['Forecasted Material Need'], errors='coerce')
+
+# --- Create a visual (line chart) ---
+plt.figure(figsize=(10, 5))
+
+for mat, grp in dataset.groupby('Material'):
+    plt.plot(grp['Week'], grp['Forecasted Material Need'], marker='o', label=f"{mat} ({grp['Model Used'].iloc[0]})")
+
+plt.title('Forecasted Material Need (Next 6 Weeks)')
+plt.xlabel('Week')
+plt.ylabel('Forecasted Material Need')
+plt.legend()
+plt.tight_layout()
+plt.show()
